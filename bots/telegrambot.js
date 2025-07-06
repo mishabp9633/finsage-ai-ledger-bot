@@ -1,12 +1,17 @@
 // telegram-bot.js
 import TelegramBot from "node-telegram-bot-api";
 import dotenv from "dotenv";
-import google from "googleapis";
+import { google } from "googleapis";
 import path from "path";
+import { fileURLToPath } from 'url'; 
+
 import { createLedgerByUser } from "../services/ledger.js";
 import { connectDB } from "../db/dbconnection.js";
 import Ledger from "../models/ledger.js";
 import User from "../models/user.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables
 dotenv.config();
@@ -15,7 +20,9 @@ await connectDB();
 // Google Sheets configuration
 const GOOGLE_SHEETS_CONFIG = {
   keyFilename: "../service-account-key.json",
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  keyFilename: path.join(__dirname, "../service-account-key.json"),
+  scopes: ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
+  // scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   // parentFolderId: 'your-google-drive-folder-id' // Optional: specify folder ID to organize sheets
 };
 
@@ -414,6 +421,7 @@ async function createLedgerSheet(ledgerData) {
   try {
     const { sheets, drive } = await initializeGoogleSheets();
 
+    console.log('sheets, drive', sheets, drive);
     // Create the spreadsheet
     const spreadsheetRequest = {
       resource: {
@@ -436,13 +444,22 @@ async function createLedgerSheet(ledgerData) {
       },
     };
 
-    const spreadsheet = await sheets.spreadsheets.create(spreadsheetRequest);
+    const spreadsheet = await sheets.spreadsheets.create(spreadsheetRequest); 
     const spreadsheetId = spreadsheet.data.spreadsheetId;
+    const sheetId = spreadsheet.data.sheets[0].properties.sheetId;
+
+    await drive.permissions.create({
+      fileId: spreadsheetId,
+      requestBody: {
+        role: "writer", 
+        type: "anyone",
+      },
+    });
 
     console.log(`📊 Created Google Sheet: ${spreadsheetId}`);
 
     // Setup the ledger structure
-    await setupLedgerStructure(sheets, spreadsheetId, ledgerData);
+    await setupLedgerStructure(sheets, spreadsheetId, sheetId, ledgerData);
 
     // Move to specified folder if configured
     if (GOOGLE_SHEETS_CONFIG.parentFolderId) {
@@ -469,7 +486,7 @@ async function createLedgerSheet(ledgerData) {
 }
 
 // Setup the ledger structure with headers, formatting, and colors
-async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
+async function setupLedgerStructure(sheets, spreadsheetId, sheetId, ledgerData) {
   const requests = [];
 
   // Define the headers and their structure
@@ -488,7 +505,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     updateCells: {
       range: {
-        sheetId: 0,
+        sheetId,       
         startRowIndex: 0,
         endRowIndex: 1,
         startColumnIndex: 0,
@@ -525,7 +542,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
     requests.push({
       updateDimensionProperties: {
         range: {
-          sheetId: 0,
+          sheetId,
           dimension: "COLUMNS",
           startIndex: index,
           endIndex: index + 1,
@@ -542,7 +559,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     updateSheetProperties: {
       properties: {
-        sheetId: 0,
+        sheetId,
         gridProperties: {
           frozenRowCount: 1,
         },
@@ -555,7 +572,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     insertDimension: {
       range: {
-        sheetId: 0,
+        sheetId,
         dimension: "ROWS",
         startIndex: 0,
         endIndex: 3,
@@ -567,7 +584,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     updateCells: {
       range: {
-        sheetId: 0,
+        sheetId,
         startRowIndex: 0,
         endRowIndex: 1,
         startColumnIndex: 0,
@@ -599,7 +616,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     mergeCells: {
       range: {
-        sheetId: 0,
+        sheetId,
         startRowIndex: 0,
         endRowIndex: 1,
         startColumnIndex: 0,
@@ -613,7 +630,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     updateCells: {
       range: {
-        sheetId: 0,
+        sheetId,
         startRowIndex: 1,
         endRowIndex: 2,
         startColumnIndex: 0,
@@ -648,7 +665,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     mergeCells: {
       range: {
-        sheetId: 0,
+        sheetId,
         startRowIndex: 1,
         endRowIndex: 2,
         startColumnIndex: 0,
@@ -662,7 +679,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     updateCells: {
       range: {
-        sheetId: 0,
+        sheetId,
         startRowIndex: 3,
         endRowIndex: 4,
         startColumnIndex: 0,
@@ -697,7 +714,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     updateSheetProperties: {
       properties: {
-        sheetId: 0,
+        sheetId,
         gridProperties: {
           frozenRowCount: 4,
         },
@@ -710,7 +727,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
   requests.push({
     setDataValidation: {
       range: {
-        sheetId: 0,
+        sheetId,
         startRowIndex: 4,
         endRowIndex: 1000,
         startColumnIndex: 0,
@@ -731,7 +748,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, ledgerData) {
     requests.push({
       setDataValidation: {
         range: {
-          sheetId: 0,
+          sheetId,
           startRowIndex: 4,
           endRowIndex: 1000,
           startColumnIndex: colIndex,
