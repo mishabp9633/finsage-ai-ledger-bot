@@ -90,6 +90,8 @@ GEMINI_API_KEY=your_gemini_api_key
 PORT=3000
 ```
 
+- Download service-account-key.json file from google cloude console
+- Add to project directory named as service-account-key.json
 ---
 
 ## 🚀 Running the Application

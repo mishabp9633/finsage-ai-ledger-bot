@@ -3,7 +3,9 @@ import TelegramBot from "node-telegram-bot-api";
 import dotenv from "dotenv";
 import { google } from "googleapis";
 import path from "path";
-import { fileURLToPath } from 'url'; 
+import { fileURLToPath } from "url";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { nanoid } from "nanoid";
 
 import { createLedgerByUser } from "../services/ledger.js";
 import { connectDB } from "../db/dbconnection.js";
@@ -17,11 +19,14 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 await connectDB();
 
-// Google Sheets configuration
+//..................Google Sheets configuration.....................//
 const GOOGLE_SHEETS_CONFIG = {
   keyFilename: "../service-account-key.json",
   keyFilename: path.join(__dirname, "../service-account-key.json"),
-  scopes: ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
+  scopes: [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+  ],
   // scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   // parentFolderId: 'your-google-drive-folder-id' // Optional: specify folder ID to organize sheets
 };
@@ -49,15 +54,30 @@ if (!BOT_TOKEN) {
 }
 
 // Create bot instance
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(BOT_TOKEN, {
+  polling: {
+    interval: 300,       // time between polls (ms)
+    params: 30,         // how long to wait for response (sec)
+    autoStart: true,
+  },
+});
 
 // Store user conversation states
 const userStates = new Map();
 
 console.log("🤖 Telegram bot is starting...");
 
+//................GEMINI CONFIG................//
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (!GEMINI_API_KEY) {
+  console.error("❌ Please set GEMINI_API_KEY in your .env file");
+  process.exit(1);
+}
+
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
 // Handle text messages
-bot.on("text", (msg) => {
+bot.on("text", async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const username = msg.from.username || msg.from.first_name;
@@ -96,6 +116,81 @@ bot.on("text", (msg) => {
       `📋 Are you sure you want to create a ledger with this name?\n\n🏷️ Name: "${messageText}"\n\nPlease confirm:`,
       confirmationOptions
     );
+    return;
+  }
+
+  // Handle entry text input
+  if (userState && userState.step === "waiting_for_entry_text") {
+    console.log(`\n📝 User ${username} entered entry text: "${messageText}"`);
+
+    // Process the entry with Gemini AI
+    bot.sendMessage(chatId, "🤖 Processing your entry with AI...");
+
+    const geminiResult = await processEntryWithGemini(messageText);
+
+    if (!geminiResult.isSuccess) {
+      bot.sendMessage(
+        chatId,
+        `❌ Failed to process entry: ${geminiResult.message}\n\nPlease try again with a clearer entry.`
+      );
+      return;
+    }
+
+    const entryData = geminiResult.data;
+
+    if (!entryData.isValid || entryData.confidence < 0.6) {
+      bot.sendMessage(
+        chatId,
+        `⚠️ AI couldn't understand your entry clearly.\n\n🤖 Reasoning: ${entryData.reasoning}\n\nPlease try again with a clearer entry like:\n• "Paid 500 for materials"\n• "Received 1000 from client"\n• "Bought supplies for 250"`
+      );
+      return;
+    }
+
+    // Store the processed entry data
+    userState.entryData = entryData;
+    userState.step = "waiting_for_entry_confirmation";
+    userStates.set(userId, userState);
+
+    // Show confirmation message
+    const confirmationMessage = `
+🤖 AI processed your entry:
+
+📅 Date: ${entryData.date}
+🧾 Voucher: ${entryData.vchName} #${entryData.vchNumber}
+📝 Description: ${entryData.description}
+💰 Amount: ${
+      entryData.debit > 0
+        ? `₹${entryData.debit} (Debit)`
+        : `₹${entryData.credit} (Credit)`
+    }
+👤 Party: ${entryData.partyName}
+
+🤖 AI Confidence: ${Math.round(entryData.confidence * 100)}%
+💭 Reasoning: ${entryData.reasoning}
+
+Is this correct?`;
+
+    const confirmationOptions = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "✅ Yes, Add Entry",
+              callback_data: "confirm_entry_yes",
+            },
+            { text: "❌ No, Cancel", callback_data: "confirm_entry_no" },
+          ],
+          [
+            {
+              text: "✏️ Edit Entry",
+              callback_data: "edit_entry",
+            },
+          ],
+        ],
+      },
+    };
+
+    bot.sendMessage(chatId, confirmationMessage, confirmationOptions);
     return;
   }
 
@@ -167,7 +262,7 @@ bot.onText(/\/start/, (msg) => {
 
   console.log(`\n🚀 /start command from ${username}`);
 
-  const welcomeMessage = `Welcome ${username}! 🎉\n\nI'm your Personal Ledger Bot! 📊\n\n📋 What I can do:\n🆕 /new l - Create a new ledger\n📝 /new e - Create a new ledger entry\n\n🔧 Other Commands:\n/help - Get detailed help\n/status - Check bot status\n/cancel - Cancel current operation\n\n💡 Start by creating your first ledger with /new l`;
+  const welcomeMessage = `Welcome ${username}! 🎉\n\nI'm your Personal Ledger Bot! 📊\n\n📋 What I can do:\n🆕 /new_l - Create a new ledger\n📝 /new_e - Create a new ledger entry\n\n🔧 Other Commands:\n/help - Get detailed help\n/status - Check bot status\n/cancel - Cancel current operation\n\n💡 Start by creating your first ledger with /new l`;
 
   bot.sendMessage(chatId, welcomeMessage);
 });
@@ -203,94 +298,11 @@ bot.onText(/\/new_l/, (msg) => {
 
   bot.sendMessage(
     chatId,
-    `📝 Please enter your ledger name:\n\nExample: "Alungal Building Work"`
+    `📝 Please enter your ledger name:\n\nExample: "ABC Building Work Ledger" \n\nFor Cancel /cancel`
   );
 });
 
 // Handle callback queries (button presses)
-
-// bot.on("callback_query", async (callbackQuery) => {
-//   const message = callbackQuery.message;
-//   const chatId = message.chat.id;
-//   const userId = callbackQuery.from.id;
-//   const username = callbackQuery.from.username || callbackQuery.from.first_name;
-//   const data = callbackQuery.data;
-
-//   console.log(`\n🔘 Button pressed by ${username}: ${data}`);
-
-//   const userState = userStates.get(userId);
-
-//   if (
-//     data === "confirm_ledger_yes" &&
-//     userState &&
-//     userState.step === "waiting_for_confirmation"
-//   ) {
-//     const ledgerName = userState.ledgerName;
-
-//     console.log(
-//       `\n✅ User ${username} confirmed ledger creation: "${ledgerName}"`
-//     );
-
-//     const ledgerData = {
-//       title: ledgerName,
-//       description: "",
-//       username,
-//     };
-
-//     try {
-//       const response = await createLedgerByUser(ledgerData);
-
-//       if (response.isSuccess) {
-//         bot.editMessageText(
-//           `✅ Ledger Created Successfully!\n\n🏷️ Name: "${
-//             response.data.title
-//           }"\n🆔 ID: ${
-//             response.data.id
-//           }\n👤 Created by: ${username}\n📅 Created at: ${new Date(
-//             response.data.createdAt
-//           ).toLocaleString()}\n\n🎉 Your ledger is ready to use!`,
-//           {
-//             chat_id: chatId,
-//             message_id: message.message_id,
-//           }
-//         );
-//       } else {
-//         bot.editMessageText(
-//           `⚠️ Failed to create ledger.\n\n❌ Reason: ${response.message}`,
-//           {
-//             chat_id: chatId,
-//             message_id: message.message_id,
-//           }
-//         );
-//       }
-
-//       userStates.delete(userId);
-//       bot.answerCallbackQuery(callbackQuery.id, {
-//         text: response.isSuccess
-//           ? "Ledger created successfully!"
-//           : "Ledger creation failed",
-//         show_alert: !response.isSuccess,
-//       });
-//     } catch (error) {
-//       console.error("Unexpected error during ledger creation:", error);
-
-//       bot.editMessageText(
-//         `🚨 Unexpected Error: Ledger creation failed due to a system issue.\n\nPlease try again or contact support.`,
-//         {
-//           chat_id: chatId,
-//           message_id: message.message_id,
-//         }
-//       );
-
-//       userStates.delete(userId);
-//       bot.answerCallbackQuery(callbackQuery.id, {
-//         text: "Unexpected system error occurred.",
-//         show_alert: true,
-//       });
-//     }
-//   }
-// });
-
 bot.on("callback_query", async (callbackQuery) => {
   const message = callbackQuery.message;
   const chatId = message.chat.id;
@@ -350,6 +362,26 @@ bot.on("callback_query", async (callbackQuery) => {
 
         if (sheetResponse.isSuccess) {
           // Update message with Google Sheet success
+          // bot.editMessageText(
+          //   `✅ Ledger & Google Sheet Created Successfully!\n\n🏷️ Name: "${
+          //     response.data.title
+          //   }"\n🆔 ID: ${
+          //     response.data.id
+          //   }\n👤 Created by: ${username}\n📅 Created at: ${new Date(
+          //     response.data.createdAt
+          //   ).toLocaleString()}\n\n📊 Google Sheet: [Open Sheet](${
+          //     sheetResponse.spreadsheetUrl
+          //   })\n📋 Sheet ID: ${
+          //     sheetResponse.spreadsheetId
+          //   }\n\n🎉 Your ledger is ready to use!\n\n Add Your Enrty /new_e`,
+          //   {
+          //     chat_id: chatId,
+          //     message_id: message.message_id,
+          //     parse_mode: "Markdown",
+          //     disable_web_page_preview: true,
+          //   }
+          // );
+
           bot.editMessageText(
             `✅ Ledger & Google Sheet Created Successfully!\n\n🏷️ Name: "${
               response.data.title
@@ -357,18 +389,25 @@ bot.on("callback_query", async (callbackQuery) => {
               response.data.id
             }\n👤 Created by: ${username}\n📅 Created at: ${new Date(
               response.data.createdAt
-            ).toLocaleString()}\n\n📊 Google Sheet: [Open Sheet](${
+            ).toLocaleString()}\n\n📊 Google Sheet: ${
               sheetResponse.spreadsheetUrl
-            })\n📋 Sheet ID: ${
+            }\n📋 Sheet ID: ${
               sheetResponse.spreadsheetId
-            }\n\n🎉 Your ledger is ready to use!`,
+            }\n\n🎉 Your ledger is ready to use!\n\n Add Your Entry /new_e`,
             {
               chat_id: chatId,
               message_id: message.message_id,
-              parse_mode: "Markdown",
+              // Remove parse_mode: "Markdown"
               disable_web_page_preview: true,
             }
           );
+          
+          //Add Spreadsheet Id to Ledger model
+          await Ledger.findByIdAndUpdate(response.data.id, {
+            $set: {
+              sheetId: sheetResponse.spreadsheetId,
+            },
+          });
         } else {
           // Ledger created but sheet failed
           bot.editMessageText(
@@ -378,6 +417,9 @@ bot.on("callback_query", async (callbackQuery) => {
               message_id: message.message_id,
             }
           );
+
+          //Remove Ledger Created Without a Sheet
+          Ledger.findByIdAndDelete(response.data.id);
         }
       } else {
         bot.editMessageText(
@@ -421,7 +463,7 @@ async function createLedgerSheet(ledgerData) {
   try {
     const { sheets, drive } = await initializeGoogleSheets();
 
-    console.log('sheets, drive', sheets, drive);
+    console.log("sheets, drive", sheets, drive);
     // Create the spreadsheet
     const spreadsheetRequest = {
       resource: {
@@ -444,14 +486,14 @@ async function createLedgerSheet(ledgerData) {
       },
     };
 
-    const spreadsheet = await sheets.spreadsheets.create(spreadsheetRequest); 
+    const spreadsheet = await sheets.spreadsheets.create(spreadsheetRequest);
     const spreadsheetId = spreadsheet.data.spreadsheetId;
     const sheetId = spreadsheet.data.sheets[0].properties.sheetId;
 
     await drive.permissions.create({
       fileId: spreadsheetId,
       requestBody: {
-        role: "writer", 
+        role: "writer",
         type: "anyone",
       },
     });
@@ -486,26 +528,31 @@ async function createLedgerSheet(ledgerData) {
 }
 
 // Setup the ledger structure with headers, formatting, and colors
-async function setupLedgerStructure(sheets, spreadsheetId, sheetId, ledgerData) {
+async function setupLedgerStructure(
+  sheets,
+  spreadsheetId,
+  sheetId,
+  ledgerData
+) {
   const requests = [];
 
   // Define the headers and their structure
   const headers = [
     "Date",
+    "VCh Name",
+    "VCh Number",
     "Description",
     "Debit",
     "Credit",
     "Balance",
-    "Category",
-    "Reference",
-    "Notes",
+    "Party Name / Remarks",
   ];
 
   // Set up headers in row 1
   requests.push({
     updateCells: {
       range: {
-        sheetId,       
+        sheetId,
         startRowIndex: 0,
         endRowIndex: 1,
         startColumnIndex: 0,
@@ -537,7 +584,7 @@ async function setupLedgerStructure(sheets, spreadsheetId, sheetId, ledgerData) 
   });
 
   // Set column widths
-  const columnWidths = [100, 200, 100, 100, 100, 120, 100, 150]; // Adjust as needed
+  const columnWidths = [150, 200, 200, 350, 250, 250, 250, 250]; // Adjust as needed
   columnWidths.forEach((width, index) => {
     requests.push({
       updateDimensionProperties: {
@@ -849,22 +896,48 @@ function sendLedgerPage(chatId, userId, page, ledgers) {
 
   bot.sendMessage(
     chatId,
-    `📚 Choose a ledger to add an entry:\n\nPage ${page + 1} of ${totalPages}`,
+    `📚 Choose a ledger to add an entry:\n\nPage ${page + 1} of ${totalPages}\n\nFor Cancel /cancel`,
     {
       reply_markup: { inline_keyboard: inlineKeyboard },
     }
   );
 }
 
+// Function to process entry with Gemini AI
 bot.on("callback_query", async (callbackQuery) => {
-  const msg = callbackQuery.message;
-  const chatId = msg.chat.id;
+  const message = callbackQuery.message;
+  const chatId = message.chat.id;
   const userId = callbackQuery.from.id;
+  const username = callbackQuery.from.username || callbackQuery.from.first_name;
   const data = callbackQuery.data;
+
+  console.log(`\n🔘 Button pressed by ${username}: ${data}`);
 
   const userState = userStates.get(userId);
 
-  // Handle pagination
+  // Handle ledger creation confirmation
+  if (
+    data === "confirm_ledger_yes" &&
+    userState &&
+    userState.step === "waiting_for_confirmation"
+  ) {
+    // ... (existing ledger creation code remains the same)
+  }
+
+  // Handle ledger creation cancellation
+  if (data === "confirm_ledger_no") {
+    userStates.delete(userId);
+    bot.editMessageText("❌ Ledger creation cancelled.", {
+      chat_id: chatId,
+      message_id: message.message_id,
+    });
+    bot.answerCallbackQuery(callbackQuery.id, {
+      text: "Cancelled",
+    });
+    return;
+  }
+
+  // Handle pagination for ledger selection
   if (data.startsWith("ledger_page:")) {
     const page = parseInt(data.split(":")[1], 10);
     if (userState && userState.ledgers) {
@@ -872,10 +945,19 @@ bot.on("callback_query", async (callbackQuery) => {
       userStates.set(userId, userState);
 
       // Delete old message before sending new
-      await bot.deleteMessage(chatId, msg.message_id);
+      await bot.deleteMessage(chatId, message.message_id);
       sendLedgerPage(chatId, userId, page, userState.ledgers);
     }
+    bot.answerCallbackQuery(callbackQuery.id);
     return;
+  }
+
+  if (!userState) {
+    bot.sendMessage(
+      chatId,
+      `❌ Current operation cancelled.\n\nYou can start fresh with:\n🆕 /new_l - Create a new ledger\n📝 /new_e - Add a new entry`
+    );
+    return
   }
 
   // Handle ledger selection
@@ -886,19 +968,316 @@ bot.on("callback_query", async (callbackQuery) => {
     userStates.set(userId, userState);
 
     bot.editMessageText(
-      `✅ Ledger selected.\nNow send your entry (e.g., "Paid 200 for materials")`,
+      `✅ Ledger selected.\n\n📝 Now send your entry text:\n\nExamples:\n• "Paid 500 for materials"\n• "Received 1000 from client John"\n• "Bought office supplies for 250"\n• "Cash deposit 2000"\n\nFor Cancel /cancel`,
       {
         chat_id: chatId,
-        message_id: msg.message_id,
+        message_id: message.message_id,
       }
     );
+    bot.answerCallbackQuery(callbackQuery.id, {
+      text: "Ledger selected",
+    });
     return;
   }
 
-  userStates.delete(userId);
+  // Handle entry confirmation
+  if (
+    data === "confirm_entry_yes" &&
+    userState &&
+    userState.step === "waiting_for_entry_confirmation"
+  ) {
+    const ledgerId = userState.selectedLedgerId;
+    const entryData = userState.entryData;
 
-  // other handlers like confirm_ledger_yes...
+    try {
+      // Get the ledger details
+      const ledger = await Ledger.findById(ledgerId);
+      if (!ledger) {
+        throw new Error("Ledger not found");
+      }
+
+      // Update message to show processing
+      bot.editMessageText(
+        `✅ Entry confirmed!\n\n📊 Adding entry to Google Sheet...`,
+        {
+          chat_id: chatId,
+          message_id: message.message_id,
+        }
+      );
+
+      // Add entry to Google Sheet
+      const sheetResult = await addEntryToSheet(ledger, entryData);
+
+      if (sheetResult.isSuccess) {
+        bot.editMessageText(
+          `✅ Entry Added Successfully!\n\n📊 Ledger: ${
+            ledger.title
+          }\n📅 Date: ${entryData.date}\n📝 Description: ${
+            entryData.description
+          }\n💰 Amount: ${
+            entryData.debit > 0
+              ? `₹${entryData.debit} (Debit)`
+              : `₹${entryData.credit} (Credit)`
+          }\n💳 New Balance: ₹${
+            sheetResult.data.newBalance
+          }\n\n🎉 Entry has been added to your Google Sheet!\n\n For New Entry /new_e\n\n For New Ledger Create /new_l\n\n For Cancel /cancel`,
+          {
+            chat_id: chatId,
+            message_id: message.message_id,
+          }
+        );
+      } else {
+        bot.editMessageText(
+          `⚠️ Entry processed but failed to add to Google Sheet.\n\n❌ Error: ${sheetResult.message}\n\n💡 Please try again or check your sheet permissions.`,
+          {
+            chat_id: chatId,
+            message_id: message.message_id,
+          }
+        );
+      }
+
+      userStates.delete(userId);
+      bot.answerCallbackQuery(callbackQuery.id, {
+        text: sheetResult.isSuccess
+          ? "Entry added successfully!"
+          : "Failed to add entry",
+        show_alert: !sheetResult.isSuccess,
+      });
+    } catch (error) {
+      console.error("Error adding entry:", error);
+      bot.editMessageText(
+        `🚨 Error adding entry: ${error.message}\n\nPlease try again.`,
+        {
+          chat_id: chatId,
+          message_id: message.message_id,
+        }
+      );
+      userStates.delete(userId);
+      bot.answerCallbackQuery(callbackQuery.id, {
+        text: "Error occurred",
+        show_alert: true,
+      });
+    }
+    return;
+  }
+
+  // Handle entry cancellation
+  if (data === "confirm_entry_no") {
+    userState.step = "waiting_for_entry_text";
+    userStates.set(userId, userState);
+
+    bot.editMessageText(
+      "❌ Entry cancelled.\n\n📝 Please send a new entry text:",
+      {
+        chat_id: chatId,
+        message_id: message.message_id,
+      }
+    );
+    bot.answerCallbackQuery(callbackQuery.id, {
+      text: "Entry cancelled",
+    });
+    return;
+  }
+
+  // Handle edit entry
+  if (data === "edit_entry") {
+    userState.step = "waiting_for_entry_text";
+    userStates.set(userId, userState);
+
+    bot.editMessageText(
+      "✏️ Let's try again.\n\n📝 Please send your entry text:",
+      {
+        chat_id: chatId,
+        message_id: message.message_id,
+      }
+    );
+    bot.answerCallbackQuery(callbackQuery.id, {
+      text: "Ready for new entry",
+    });
+    return;
+  }
 });
+
+// Add /cancel command handler
+bot.onText(/\/cancel/, (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const username = msg.from.username || msg.from.first_name;
+
+  console.log(`\n❌ /cancel command from ${username}`);
+
+  // Check if user has any active state
+  const userState = userStates.get(userId);
+
+  if (userState) {
+    userStates.delete(userId);
+    bot.sendMessage(
+      chatId,
+      `❌ Current operation cancelled.\n\nYou can start fresh with:\n🆕 /new_l - Create a new ledger\n📝 /new_e - Add a new entry`
+    );
+  } else {
+    bot.sendMessage(
+      chatId,
+      `ℹ️ No active operation to cancel.\n\nAvailable commands:\n🆕 /new_l - Create a new ledger\n📝 /new_e - Add a new entry`
+    );
+  }
+});
+
+// Add /status command handler
+bot.onText(/\/status/, (msg) => {
+  const chatId = msg.chat.id;
+  const username = msg.from.username || msg.from.first_name;
+
+  console.log(`\n📊 /status command from ${username}`);
+
+  bot.sendMessage(
+    chatId,
+    `🤖 Bot Status: Active ✅\n\n📊 Available Features:\n• Create ledgers with Google Sheets\n• Add entries with AI processing\n• Automatic balance calculation\n\n🚀 Ready to help with your ledger management!`
+  );
+});
+
+//..............Functions................//
+async function processEntryWithGemini(entryText) {
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-8b" });
+
+    const prompt = `
+You are a ledger entry processor. Analyze the following entry text and extract structured data for a financial ledger. Return ONLY valid JSON (no markdown, no code blocks, no additional text):
+
+Entry Text: "${entryText}"
+
+Please analyze this entry and respond with a JSON object containing:
+{
+  "isValid": boolean, // true if this looks like a valid financial entry
+  "date": "DD-MM-YYYY", // today's date or extracted date
+  "vchName": "string", // voucher name/type (e.g., "Payment", "Receipt", "Purchase", etc.)
+  "description": "string", // clean description of the transaction
+  "debit": number, // amount if it's a debit (money going out/expense)
+  "credit": number, // amount if it's a credit (money coming in/income)
+  "partyName": "string", // person/entity involved in transaction
+  "confidence": number, // 0-1 score of how confident you are in this parsing
+  "reasoning": "string" // brief explanation of your parsing
+}
+
+Rules:
+1. Only ONE of debit or credit should have a value, the other should be 0
+2. If someone "paid" or "spent" money, it's usually a debit
+3. If someone "received" or "earned" money, it's usually a credit
+4. Extract amounts from text (handle formats like "200", "₹200", "Rs.200", "200 rupees")
+5. Generate appropriate voucher names like "Payment", "Receipt", "Purchase", "Sale", etc.
+6. Use today's date if no date is mentioned
+7. Be conservative - if you're not sure, set isValid to false
+
+Current date: ${new Date().toISOString().split("T")[0]}
+
+Respond with ONLY the JSON object, no additional text.
+`;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    let text = response.text().trim();
+
+    // Clean up the response - remove markdown code blocks if present
+    text = text
+      .replace(/```json\n?/g, "")
+      .replace(/```\n?/g, "")
+      .trim();
+
+    // Additional cleanup for any backticks
+    text = text.replace(/`/g, "");
+
+    console.log("Gemini raw response:", text);
+
+    // Parse the JSON response
+    const parsedData = JSON.parse(text);
+
+
+    // const result = await model.generateContent(prompt);
+    // const response = await result.response;
+    // const text = response.text();
+
+    // // Parse the JSON response
+    // const parsedData = JSON.parse(text);
+
+    return {
+      isSuccess: true,
+      data: parsedData,
+    };
+  } catch (error) {
+    console.error("Error processing entry with Gemini:", error);
+    return {
+      isSuccess: false,
+      message: "Failed to process entry with AI",
+    };
+  }
+}
+
+// Function to add entry to Google Sheet
+async function addEntryToSheet(ledger, entryData) {
+  try {
+    const { sheets } = await initializeGoogleSheets();
+    const spreadsheetId = ledger.sheetId;
+
+    if (!spreadsheetId) {
+      throw new Error("Ledger does not have an associated Google Sheet");
+    }
+
+    // Get current data to calculate new balance
+    const currentData = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "Ledger!A:H",
+    });
+
+    const rows = currentData.data.values || [];
+    const dataRows = rows.slice(4); // Skip header rows
+
+    // Calculate current balance
+    let currentBalance = 0;
+    if (dataRows.length > 0) {
+      const lastRow = dataRows[dataRows.length - 1];
+      currentBalance = parseFloat(lastRow[6]) || 0; // Balance column
+    }
+
+    // Calculate new balance
+    const newBalance = currentBalance + entryData.credit - entryData.debit;
+
+    // Prepare new row data
+    const newRow = [
+      entryData.date,
+      entryData.vchName,
+      entryData.vchNumber || nanoid(), 
+      entryData.description,
+      entryData.debit || "",
+      entryData.credit || "",
+      newBalance,
+      entryData.partyName,
+    ];
+
+    // Add the new row
+    const result = await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: "Ledger!A:H",
+      valueInputOption: "USER_ENTERED",
+      resource: {
+        values: [newRow],
+      },
+    });
+
+    return {
+      isSuccess: true,
+      data: {
+        newBalance,
+        rowAdded: result.data.updates.updatedRows,
+      },
+    };
+  } catch (error) {
+    console.error("Error adding entry to sheet:", error);
+    return {
+      isSuccess: false,
+      message: `Failed to add entry to sheet: ${error.message}`,
+    };
+  }
+}
 
 //...........................new_e end..........................//
 
