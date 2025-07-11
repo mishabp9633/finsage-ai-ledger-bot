@@ -4,6 +4,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "start": "node index.js && bots/telegrambot.js",
     "dev": "nodemon index.js",
     "bot": "nodemon bots/telegrambot.js",
     "inngest-dev": "npx inngest-cli@latest dev"

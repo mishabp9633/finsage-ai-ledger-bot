@@ -17,39 +17,45 @@ const __dirname = path.dirname(__filename);
 
 // Load environment variables
 dotenv.config();
-await connectDB();
+try {
+  await connectDB();
+  console.log("Connected to database successfully.");
+} catch (error) {
+  console.error("Failed to connect to the database:", error);
+  process.exit(1);
+}
 
 //..................Google Sheets configuration.....................//
 const GOOGLE_SHEETS_CONFIG = {
-  keyFilename: "../service-account-key.json",
   keyFilename: path.join(__dirname, "../service-account-key.json"),
   scopes: [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
   ],
-  // scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  // parentFolderId: 'your-google-drive-folder-id' // Optional: specify folder ID to organize sheets
 };
 
 // Initialize Google Sheets API
 async function initializeGoogleSheets() {
-  const auth = new google.auth.GoogleAuth({
-    keyFile: GOOGLE_SHEETS_CONFIG.keyFilename,
-    scopes: GOOGLE_SHEETS_CONFIG.scopes,
-  });
-
-  const authClient = await auth.getClient();
-  const sheets = google.sheets({ version: "v4", auth: authClient });
-  const drive = google.drive({ version: "v3", auth: authClient });
-
-  return { sheets, drive };
+  try {
+    const auth = new google.auth.GoogleAuth({
+      keyFile: GOOGLE_SHEETS_CONFIG.keyFilename,
+      scopes: GOOGLE_SHEETS_CONFIG.scopes,
+    });
+    const authClient = await auth.getClient();
+    const sheets = google.sheets({ version: "v4", auth: authClient });
+    const drive = google.drive({ version: "v3", auth: authClient });
+    return { sheets, drive };
+  } catch (error) {
+    console.error("Error initializing Google Sheets client:", error);
+    throw error;
+  }
 }
 
 // Get bot token from environment variables
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 if (!BOT_TOKEN) {
-  console.error("❌ Please set TELEGRAM_BOT_TOKEN in your .env file");
+console.error("❌ TELEGRAM_BOT_TOKEN is missing in .env");
   process.exit(1);
 }
 
@@ -66,11 +72,12 @@ const bot = new TelegramBot(BOT_TOKEN, {
 const userStates = new Map();
 
 console.log("🤖 Telegram bot is starting...");
+console.log("Bot Username:", bot.getMe().then(me => me.username).catch(err => "Unknown"));
 
 //................GEMINI CONFIG................//
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) {
-  console.error("❌ Please set GEMINI_API_KEY in your .env file");
+console.error("❌ GEMINI_API_KEY is missing in .env");
   process.exit(1);
 }
 

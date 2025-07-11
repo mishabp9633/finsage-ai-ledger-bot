@@ -18,4 +18,8 @@ app.use(express.json());
 app.use("/api/auth", userRoutes);
 app.use("/api/ledgers", ledgerRoutes);
 
-await connectDB()
+await connectDB();
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});

@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: finsaga-server
+    env: node
+    rootDir: .
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: MONGO_URI
+        fromService:
+          type: native
+          name: mongo
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MAILTRAP_SMTP_HOST
+        value: sandbox.smtp.mailtrap.io
+      - key: MAILTRAP_SMTP_PORT
+        value: 2525
+      - key: MAILTRAP_SMTP_USER
+        sync: false
+      - key: MAILTRAP_SMTP_PASS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: APP_URL
+        value: https://finsaga-server.onrender.com
